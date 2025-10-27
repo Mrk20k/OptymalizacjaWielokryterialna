@@ -12,14 +12,14 @@ from functools import partial
 import metody_optymalizacji
 import tkinter.font as tkFont
 
-def fmt_sig(x, sig=3):
+def fmt_sig(x, sig=4):
     if isinstance(x, (int, float)):
         if x == 0:
             return "0"
         return f"{x:.{sig}g}"
     return str(x)
 
-def fmt_tuple(t, sig=3):
+def fmt_tuple(t, sig=4):
     return tuple(float(fmt_sig(x, sig)) for x in t)
 # ============================
 #       MAIN GUI CLASS
@@ -53,7 +53,7 @@ class ParetoApp(tk.Tk):
         gen_frame.pack(fill='x', pady=6)
         ttk.Label(gen_frame, text='Rozkład:').grid(row=0, column=0)
         self.dist_cb = ttk.Combobox(gen_frame, values=['Normalny', 'Jednostajny', 'Eksponencjalny'], state='readonly')
-        self.dist_cb.current(0)
+        self.dist_cb.current(1)
         self.dist_cb.grid(row=0, column=1)
 
         ttk.Label(gen_frame, text='Parametr:').grid(row=1, column=0)
@@ -66,7 +66,18 @@ class ParetoApp(tk.Tk):
         self.count_entry.insert(0, '10')
         self.count_entry.grid(row=2, column=1)
 
-        ttk.Button(gen_frame, text='Generuj', command=self.on_generate).grid(row=3, column=0, columnspan=2, pady=4)
+        ttk.Label(gen_frame, text='Liczba zbiorów:').grid(row=3, column=0)
+        self.num_sets_entry = ttk.Entry(gen_frame)
+        self.num_sets_entry.insert(0, '1')
+        self.num_sets_entry.grid(row=3, column=1)
+
+        ttk.Button(gen_frame, text='Generuj', command=self.on_generate).grid(row=4, column=0, columnspan=2, pady=4)
+
+        # wybór zbioru (dla wielu zbiorów)
+        ttk.Label(gen_frame, text='Podgląd zbioru:').grid(row=5, column=0)
+        self.dataset_select = ttk.Combobox(gen_frame, state='disabled', width=5)
+        self.dataset_select.grid(row=5, column=1)
+        self.dataset_select.bind('<<ComboboxSelected>>', self.on_dataset_change)
 
         # import danych
         imp_frame = ttk.LabelFrame(left, text='Import danych')
@@ -155,11 +166,11 @@ class ParetoApp(tk.Tk):
         
         new_vals = []
         if dist == 'Normalny':
-            new_vals = list(np.random.normal(loc=param, scale=max(1, param*0.3), size=n))
+            new_vals = list(np.random.normal(loc=param, scale=max(1, param/0.3), size=n))
         elif dist == 'Jednostajny':
             new_vals = list(np.random.uniform(0, param, size=n))
         else:
-            new_vals = list(np.random.exponential(scale=max(1,param/2), size=n))
+            new_vals = list(np.random.exponential(scale=max(1,param), size=n))
 
         self.data = [tuple(list(row) + [v]) for row,v in zip(self.data, new_vals)]
 
@@ -184,19 +195,42 @@ class ParetoApp(tk.Tk):
         try:
             n = int(self.count_entry.get())
             param = float(self.param_entry.get())
+            num_sets = int(self.num_sets_entry.get())
         except ValueError:
             messagebox.showerror('Błąd', 'Niepoprawne parametry generacji')
             return
 
         dist = self.dist_cb.get()
-        if dist == 'Normalny':
-            self.data = [tuple(np.random.normal(loc=param, scale=max(1, param*0.3), size=self.num_criteria)) for _ in range(n)]
-        elif dist == 'Jednostajny':
-            self.data = [tuple(np.random.uniform(0, param, size=self.num_criteria)) for _ in range(n)]
-        else:
-            self.data = [tuple(np.random.exponential(scale=max(1,param/2), size=self.num_criteria)) for _ in range(n)]
 
-        self.update_table()
+        def generate_one():
+            if dist == 'Normalny':
+                return [tuple(np.random.normal(loc=param, scale=max(1, param), size=self.num_criteria)) for _ in range(n)]
+            elif dist == 'Jednostajny':
+                return [tuple(np.random.uniform(0, param, size=self.num_criteria)) for _ in range(n)]
+            else:
+                return [tuple(np.random.exponential(scale=max(1,param), size=self.num_criteria)) for _ in range(n)]
+
+        if num_sets > 1:
+            self.data = [generate_one() for _ in range(num_sets)]
+            self.current_dataset = 0
+
+            # włącz combobox wyboru zbioru
+            self.dataset_select['values'] = [str(i+1) for i in range(num_sets)]
+            self.dataset_select.current(0)
+            self.dataset_select['state'] = 'readonly'
+
+            self.update_table_with_dataset(self.data[self.current_dataset])
+            messagebox.showinfo(
+                'Info',
+                f'Wygenerowano {num_sets} zbiorów danych, każdy po {n} punktów.\n'
+                f'Możesz przeglądać je z listy "Podgląd zbioru".\n'
+                f'Dla wielu zbiorów punkty Pareto i wykres nie będą wyświetlane.'
+            )
+        else:
+            self.data = generate_one()
+            self.dataset_select.set('')
+            self.dataset_select['state'] = 'disabled'
+            self.update_table()
 
     def load_csv(self):
         path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
@@ -224,26 +258,63 @@ class ParetoApp(tk.Tk):
         except Exception as e:
             messagebox.showerror('Błąd', f'Nie udało się wczytać pliku:\n{e}')
 
-    def update_table(self):
+    def render_table(self, dataset):
+        """Aktualizuje zawartość tabeli dla dowolnego zbioru danych."""
         self.table["columns"] = [f"c{i}" for i in range(1, self.num_criteria + 1)]
-        max_width_per_col = 80
+
+        # oblicz szerokość kolumn dynamicznie, z limitem
+        max_width_per_col = 120
+        font = tkFont.Font()
+
+        # upewnij się, że dataset nie jest pusty
+        if not dataset:
+            dataset = []
 
         for i, col in enumerate(self.table["columns"]):
-            self.table.heading(col, text=f"Kryterium {i+1}")
-            font = tkFont.Font()
+            header_text = f"Kryterium {i+1}"
             max_text_width = max(
-                [font.measure(str(row[i])) for row in self.data] + [font.measure(f"Kryterium {i+1}")]
+                [font.measure(str(row[i])) for row in dataset] + [font.measure(header_text)] if dataset else [font.measure(header_text)]
             )
-            width = min(max_text_width + 20, max_width_per_col)  # add padding, respect max
+            width = min(max_text_width + 20, max_width_per_col)
+            self.table.heading(col, text=header_text)
             self.table.column(col, width=width, minwidth=50, anchor='center', stretch=False)
 
+        # usuń poprzednie wiersze
         for r in self.table.get_children():
             self.table.delete(r)
 
-        for idx, row in enumerate(self.data):
+        # wstaw nowe dane
+        for idx, row in enumerate(dataset):
             padded = list(row) + [''] * (self.num_criteria - len(row))
-            self.table.insert('', 'end', iid=str(idx),
-                            values=[fmt_sig(v) if isinstance(v, (int, float)) else v for v in padded])
+            formatted = [fmt_sig(v) if isinstance(v, (int, float)) else v for v in padded]
+            self.table.insert('', 'end', iid=str(idx), values=formatted)
+
+        # odśwież scrollbar
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+
+    def update_table(self):
+        """Aktualizuje tabelę dla pojedynczego zbioru danych."""
+        if isinstance(self.data, list) and len(self.data) > 0 and isinstance(self.data[0], (list, tuple)):
+            self.render_table(self.data)
+        else:
+            self.render_table([])
+
+
+    def update_table_with_dataset(self, dataset):
+        """Aktualizuje tabelę przy wielu zbiorach danych (zachowując scroll)."""
+        self.render_table(dataset)
+
+    def on_dataset_change(self, event=None):
+        if not hasattr(self, 'data') or not self.data:
+            return
+        try:
+            idx = int(self.dataset_select.get()) - 1
+            if 0 <= idx < len(self.data):
+                self.current_dataset = idx
+                self.update_table_with_dataset(self.data[idx])
+        except Exception:
+            pass
 
     def add_row(self):
         vals = [0.0]*self.num_criteria
@@ -262,12 +333,50 @@ class ParetoApp(tk.Tk):
 
     # --- ALGORYTMY ---
     def on_solve(self):
-        X = [tuple(map(float,p)) for p in self.data]
-        if not X:
-            messagebox.showinfo('Info','Brak danych')
+        if not self.data:
+            messagebox.showinfo('Info', 'Brak danych')
             return
+
         alg = self.alg_cb.get()
-        punkt_idealny=[]
+
+        # Sprawdź, czy mamy wiele zbiorów
+        if isinstance(self.data[0][0], (list, tuple)):
+            total_p = 0
+            total_points = 0
+            total_por_p = 0
+            total_por_wsp = 0
+            total_time = 0.0
+
+            for dataset in self.data:
+                X = [tuple(map(float, p)) for p in dataset]
+                if alg == 'Naiwny':
+                    P, por_p, por_wsp, czas = metody_optymalizacji.znajdz_front_pareto(X, self.kierunki)
+                elif alg == 'Filtracja':
+                    P, por_p, por_wsp, czas = metody_optymalizacji.znajdz_front_z_filtracja(X, self.kierunki)
+                else:
+                    P, por_p, por_wsp, czas, _ = metody_optymalizacji.algorytm_punkt_idealny(X, self.kierunki)
+
+                total_points += len(X)
+                total_p += len(P)
+                total_por_p += por_p
+                total_por_wsp += por_wsp
+                total_time += czas
+
+            self.results_text.delete('1.0', tk.END)
+            self.results_text.insert(tk.END, f'=== Wiele zbiorów danych ===\n')
+            self.results_text.insert(tk.END, f'Liczba zbiorów: {len(self.data)}\n')
+            self.results_text.insert(tk.END, f'Łączna liczba punktów: {total_points}\n')
+            self.results_text.insert(tk.END, f'Łączna liczba punktów Pareto: {total_p}\n')
+            self.results_text.insert(tk.END, f'Łączna liczba porównań punktów: {total_por_p}\n')
+            self.results_text.insert(tk.END, f'Łączna liczba porównań współrzędnych: {total_por_wsp}\n')
+            self.results_text.insert(tk.END, f'Łączny czas obliczeń: {total_time:.6f} s\n\n')
+            self.results_text.insert(tk.END, 'Dla wielu zbiorów danych punkty Pareto nie są wyświetlane.\n')
+            return
+
+        # --- tryb pojedynczego zbioru ---
+        X = [tuple(map(float, p)) for p in self.data]
+        punkt_idealny = []
+
         if alg == 'Naiwny':
             P, por_p, por_wsp, czas = metody_optymalizacji.znajdz_front_pareto(X, self.kierunki)
         elif alg == 'Filtracja':
@@ -276,13 +385,13 @@ class ParetoApp(tk.Tk):
             P, por_p, por_wsp, czas, punkt_idealny = metody_optymalizacji.algorytm_punkt_idealny(X, self.kierunki)
 
         remaining = len(X) - len(P)
-
         self.results_text.delete('1.0', tk.END)
         self.results_text.insert(tk.END, f'Front Pareto: {len(P)} punktów\n')
         self.results_text.insert(tk.END, f'Zdominowanych: {remaining}\n')
         self.results_text.insert(tk.END, f'Porównań punktów: {por_p}\n')
         self.results_text.insert(tk.END, f'Porównań współrzędnych: {por_wsp}\n')
         self.results_text.insert(tk.END, f'Czas: {czas:.6f} s\n\n')
+
         if punkt_idealny:
             self.results_text.insert(tk.END, 'Punkt idealny:\n')
             self.results_text.insert(tk.END, f'{fmt_tuple(punkt_idealny)}\n')
@@ -290,6 +399,7 @@ class ParetoApp(tk.Tk):
         for p in P:
             self.results_text.insert(tk.END, f'{fmt_tuple(p)}\n')
 
+        # wykres tylko dla pojedynczego zbioru
         if punkt_idealny:
             self.show_plot_window(X, P, punkt_idealny)
         else:
