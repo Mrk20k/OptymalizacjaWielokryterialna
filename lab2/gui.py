@@ -9,7 +9,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from mpl_toolkits.mplot3d import Axes3D
 from functools import partial
-import metody_optymalizacji
+import metody_optymalizacji as metody_optymalizacji
 import tkinter.font as tkFont
 
 def fmt_sig(x, sig=4):
